@@ -18,10 +18,24 @@ class Storage():
     def path(self, directory):
         return os.path.join(self.root, directory)
 
-    def download(self, url, path=""):
-        _path = os.path.join(self.root, path)
-        if not os.path.exists(_path):
-            raise Exception(f"{_path} does not exist.")
+    def download(self, url, directory="", file_name=""):
+        _dir = os.path.join(self.root, directory)
+        if not os.path.exists(_dir):
+            raise Exception(f"{_dir} does not exist.")
+
+        save_file_path = ""
+        if file_name:
+            save_file_path = os.path.abspath(os.path.join(_dir, file_name))
+        else:
+            parsed = urlparse(url)
+            file_name = os.path.basename(parsed.path)
+            _, ext = os.path.splitext(file_name)
+            if ext:
+                save_file_path = os.path.abspath(os.path.join(_dir, file_name))
+
+        if os.path.exists(save_file_path):
+            print(f"{save_file_path} already exist.")
+            return save_file_path
 
         resp = requests.get(url, stream=True)
         if not resp.ok:
@@ -29,8 +43,10 @@ class Storage():
 
         # save content in response to file
         total_size = int(resp.headers.get("content-length", 0))
-        file_name = self._get_file_name(url, resp)
-        save_file_path = os.path.abspath(os.path.join(_path, file_name))
+        if not file_name:
+            file_name = self._get_file_name_from_resp(url, resp)
+            save_file_path = os.path.abspath(os.path.join(_dir, file_name))
+
         with open(save_file_path, "wb") as f:
             chunk_size = 1024
             limit = total_size / chunk_size
@@ -40,7 +56,7 @@ class Storage():
 
         return save_file_path
 
-    def _get_file_name(self, url, resp):
+    def _get_file_name_from_resp(self, url, resp):
         file_name = ""
         if resp and "content-disposition" in resp.headers:
             cd = resp.headers["content-disposition"]
@@ -48,9 +64,6 @@ class Storage():
             if file_matches:
                 file_name = file_matches.group(0)
                 file_name = file_name.split("=")[1]
-        else:
-            parsed = urlparse(url)
-            file_name = os.path.basename(parsed.path)
 
         return file_name
 
