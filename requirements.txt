@@ -1,4 +1,5 @@
 requests==2.22.0
 tqdm==4.34.0
+seqeval==0.0.12
 git+https://github.com/hiroshi-matsuda-rit/spaCy.git@feature/simple_sudachipy_integration
 git+https://github.com/megagonlabs/ginza/releases/download/latest/ginza-latest.tar.gz
