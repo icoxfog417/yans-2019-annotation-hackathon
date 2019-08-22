@@ -10,7 +10,7 @@ import requests
 
 class Storage():
 
-    def __init__(self, root=""):
+    def __init__(self, root="", force=False):
         self.root = root
         if not root:
             self.root = os.path.join(os.path.dirname(__file__), "../data")
