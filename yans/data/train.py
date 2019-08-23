@@ -2,11 +2,13 @@ import os
 import sys
 import json
 import random
+import time
 import argparse
-from tqdm import tqdm
 import spacy
 from spacy.util import get_lang_class, minibatch, compounding
-import spacy.cli.train as train_util
+from spacy.cli.train import _load_vectors
+from spacy.gold import GoldParse
+from spacy.scorer import Scorer
 import boto3
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -30,13 +32,24 @@ def make_data(storage, path, validation_split=0.3):
     return data
 
 
-def train(data, vectors="", odel="ja", validation_split=0.3, iteration=30,
-          output_path="model/trained"):
-    lang_cls = get_lang_class("ja")
+def evaluate(model, test):
+    scorer = Scorer()
+    for text, annotation in test:
+        doc = model(text)
+        gold_doc = model.make_doc(text)
+        gold = GoldParse(gold_doc, entities=annotation["entities"])
+        scorer.score(doc, gold)
+
+    return scorer.scores
+
+
+def train(data, model="ja", iteration=30, validation_split=0.3,
+          vectors="", output_path="model/trained"):
+    lang_cls = get_lang_class(model)
     nlp = lang_cls()
 
     if vectors:
-        train_util._load_vectors(nlp, vectors)
+        _load_vectors(nlp, vectors)
 
     if "ner" not in nlp.pipe_names:
         ner = nlp.create_pipe("ner")
@@ -58,10 +71,11 @@ def train(data, vectors="", odel="ja", validation_split=0.3, iteration=30,
     optimizer = nlp.begin_training()
     with nlp.disable_pipes(*other_pipes):
         for itn in range(iteration):
+            start = time.time()
             random.shuffle(train_data)
             losses = {}
 
-            batches = minibatch(data, size=compounding(4.0, 32.0, 1.001))
+            batches = minibatch(data, size=compounding(4.0, 32.0, 2.0))
             for batch in batches:
                 texts, annotations = zip(*batch)
                 nlp.update(
@@ -71,8 +85,11 @@ def train(data, vectors="", odel="ja", validation_split=0.3, iteration=30,
                     sgd=optimizer,
                     losses=losses,
                 )
-            print(losses)
+            elapse = time.time() - start
+            score = evaluate(nlp, test_data)
+            print(f"{itn}: loss={losses['ner']} f1={score['ents_f']} elapse={elapse} [sec]")
 
+    """
     storage = Storage()
     _dir = storage.path(output_path)
     if not os.path.exists(_dir):
@@ -84,31 +101,51 @@ def train(data, vectors="", odel="ja", validation_split=0.3, iteration=30,
     # test the saved model
     print("Loading from", _dir)
     nlp2 = spacy.load(_dir)
+    """
+
+    score = evaluate(nlp, test_data)
+    """
     for text, _ in test_data[:3]:
-        doc = nlp2(text)
+        doc = nlp(text)
         print("Entities", [(ent.text, ent.label_) for ent in doc.ents])
         print("Tokens", [(t.text, t.ent_type_, t.ent_iob) for t in doc])
+    """
+    return score
 
 
-def main(annotation_file, 
-         validation_split, iteration, output_path):
+def main(annotation_path, iteration, validation_split):
 
     bucket = "yans.2019.js"
     auth_path = "auth/yans2019_credential.json"
-    annotation_path = f"submit/{annotation_file}"
+    book_id = "1WDwojAFoswN_rBe0P31sKECcWeku25fgLtAG7ZSbAUo"
     storage = Storage()
 
     s3 = boto3.resource("s3")
 
     print(f"Get data from {annotation_path}")
+    annotation_file = os.path.basename(annotation_path)
     data_path = storage.path(f"raw/{annotation_file}")
     s3.Bucket(bucket).download_file(annotation_path, data_path)
 
     print(f"Make Training Data")
     data = make_data(storage, f"raw/{annotation_file}", validation_split)
 
+    print("Download word vectors")
+    url = "https://github.com/megagonlabs/UD_Japanese-PUD/releases/download/ja_pud-2.1.0/ja_pud-2.1.0.tar.gz"
+    vector_path = storage.path("vector/ja_pud-2.1.0")
+
+    if not os.path.exists(vector_path):
+        tar = storage.download(url, directory="vector")
+        vector_path = storage.extractall(tar)
+
     print(f"Execute Training")
-    train(data)
+    score = train(data, model="ja",
+                  iteration=iteration, validation_split=validation_split,
+                  vectors=vector_path)
+    per_label = ""
+    for entity in score["ents_per_type"]:
+        s = score["ents_per_type"][entity]["f"]
+        per_label += f"{entity}={s} "
 
     print(f"Write Result to Spread Sheet.")
     o = s3.Object(bucket, auth_path)
@@ -120,20 +157,17 @@ def main(annotation_file,
             "https://www.googleapis.com/auth/drive"
         ])
     client = gspread.authorize(cred)
-    book_id = "1WDwojAFoswN_rBe0P31sKECcWeku25fgLtAG7ZSbAUo"
     book = client.open_by_key(book_id)
     sheet = book.get_worksheet(0)
-    sheet.append_row([0, "Hello!"])
+    sheet.append_row([annotation_file, score["ents_f"], per_label])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--file_path", type=str, default="annotation.jsonl")
-    parser.add_argument("--validation_split", type=float, default=0.3)
+    parser.add_argument("--file_path", type=str, default="data/test_teamnull.jsonl")
     parser.add_argument("--iteration", type=int, default=10)
-    parser.add_argument("--output_path", type=str, default="model/trained")
+    parser.add_argument("--validation_split", type=float, default=0.3)
     args = parser.parse_args()
 
     main(args.file_path,
-         args.validation_split, args.iteration,
-         args.output_path)
+         args.iteration, args.validation_split)
