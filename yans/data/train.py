@@ -46,6 +46,7 @@ def evaluate(model, test):
 def train(data, model="ja_ginza", iteration=30, validation_split=0.3,
           num_limit=-1, output_path="model/trained"):
 
+    spacy.prefer_gpu()
     nlp = spacy.load(model, disable=["ner"])
     nlp.tokenizer.use_sentence_separator = False
 
