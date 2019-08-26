@@ -6,7 +6,7 @@ import random
 import time
 import argparse
 import spacy
-from spacy.util import get_lang_class, minibatch, compounding
+from spacy.util import minibatch, compounding
 from spacy.gold import GoldParse
 from spacy.scorer import Scorer
 import boto3
@@ -16,7 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../../"))
 from yans.storage import Storage
 
 
-def make_data(path, validation_split=0.3):
+def make_data(path):
     jsons = []
     with open(path, encoding="utf-8") as f:
         jsons = [json.loads(line) for line in f.readlines()]
@@ -32,19 +32,53 @@ def make_data(path, validation_split=0.3):
     return data
 
 
-def evaluate(model, test):
-    scorer = Scorer()
-    for text, annotation in test:
-        parsed = model(text)
-        doc = model.make_doc(text)
-        gold = GoldParse(doc, entities=annotation["entities"])
-        scorer.score(parsed, gold)
+class Evaluator():
 
-    return scorer.scores
+    def __init__(self, label_data):
+        self.label_data = label_data
+        self.golds = []
+
+    @property
+    def texts(self):
+        return [t_a[0] for t_a in self.label_data]
+
+    @classmethod
+    def evaluate_from_file(cls, model_path, label_path):
+        data = make_data(label_path)
+        model = spacy.load(model_path)
+        evaluator = cls(data)
+        return evaluator.evaluate(model)
+
+    def init_golds(self, model):
+        self.get_golds(model, True)
+        return self
+
+    def get_golds(self, model, force=False):
+        if len(self.golds) > 0 and not force:
+            return self.golds
+
+        self.golds = []
+        for text, annotation in self.label_data:
+            doc = model.tokenizer(text)
+            gold = GoldParse(doc, entities=annotation["entities"])
+            self.golds.append(gold)
+
+        return self.golds
+
+    def evaluate(self, model, force=False):
+        golds = self.get_golds(model, True)
+        parsed = list(model.pipe(self.texts))
+
+        scorer = Scorer()
+        for p, g in zip(parsed, golds):
+            scorer.score(p, g)
+
+        return scorer.scores
 
 
-def train(data, model="ja_ginza", iteration=30, validation_split=0.3,
-          num_limit=-1, output_path="model/trained"):
+def train(annotation_path, model="ja_ginza",
+          iteration=30, validation_split=0.3,
+          num_limit=-1, metrics="ents_f", save_callback=None):
 
     spacy.prefer_gpu()
     nlp = spacy.load(model, disable=["ner"])
@@ -65,6 +99,8 @@ def train(data, model="ja_ginza", iteration=30, validation_split=0.3,
     ner = nlp.create_pipe("ner")
     nlp.add_pipe(ner, after="parser")
 
+    data = make_data(annotation_path)
+
     if num_limit > 0:
         data = data[:num_limit]
 
@@ -77,6 +113,9 @@ def train(data, model="ja_ginza", iteration=30, validation_split=0.3,
     train_data = data[:-num_test]
     test_data = data[-num_test:]
 
+    best_score = -1
+    train_evaluator = Evaluator(train_data).init_golds(nlp)
+    test_evaluator = Evaluator(test_data).init_golds(nlp)
     other_pipes = [pipe for pipe in nlp.pipe_names if pipe != "ner"]
     with nlp.disable_pipes(*other_pipes):
         optimizer = nlp.begin_training()
@@ -98,28 +137,18 @@ def train(data, model="ja_ginza", iteration=30, validation_split=0.3,
                 )
 
             elapse = time.time() - start
-            train_score = evaluate(nlp, train_data[:num_test])  # For speedup
-            score = evaluate(nlp, test_data)
+            train_score = train_evaluator.evaluate(nlp)
+            score = test_evaluator.evaluate(nlp)
             print(f"{itn}: loss={losses['ner']} "
-                  f"\t train_f1={train_score['ents_f']:.3f}"
-                  f"\t valid_f1={score['ents_f']:.3f}"
+                  f"\t train_f1={train_score[metrics]:.3f}"
+                  f"\t valid_f1={score[metrics]:.3f}"
                   f"\t elapse={elapse:.3f} [sec]")
 
-    """
-    storage = Storage()
-    _dir = storage.path(output_path)
-    if not os.path.exists(_dir):
-        os.mkdir(_dir)
+            if score[metrics] > best_score and save_callback is not None:
+                save_callback(nlp)
+                best_score = score[metrics]
 
-    nlp.to_disk(_dir)
-    print("Saved model to", _dir)
-
-    # test the saved model
-    print("Loading from", _dir)
-    nlp2 = spacy.load(_dir)
-    """
-
-    score = evaluate(nlp, test_data)
+    score = test_evaluator.evaluate(nlp)
     for text, _ in test_data[:3]:
         doc = nlp(text)
         print("Entities", [(ent.text, ent.label_) for ent in doc.ents])
@@ -140,6 +169,7 @@ def main(annotation_path, model,
     s3 = boto3.resource("s3")
     annotation_file = os.path.basename(annotation_path)
 
+    # Get Data
     if not local:
         print(f"Get data from {annotation_path}")
         data_path = storage.path(f"raw/{annotation_file}")
@@ -148,18 +178,36 @@ def main(annotation_path, model,
     else:
         print(f"Get data from {annotation_path} (local)")
 
-    print(f"Make Training Data")
-    data = make_data(annotation_path, validation_split)
-
+    # Train Model
     print(f"Execute Training")
-    score = train(data, model=model,
+
+    def save_model(nlp):
+        name, ext = os.path.splitext(annotation_file)
+        _dir = storage.path(f"model/{name}")
+        if os.path.exists(_dir):
+            shutil.rmtree(_dir)
+        os.mkdir(_dir)
+
+        nlp.to_disk(_dir)
+        shutil.make_archive(_dir, "zip", root_dir=storage.path("model"),
+                            base_dir=name)
+        shutil.rmtree(_dir)
+        if not local:
+            key = f"model/{name}.zip"
+            archive = storage.path(key)
+            s3.Bucket(bucket).upload_file(archive, key)
+
+    print(f"Make Training Data")
+    score = train(annotation_path, model=model,
                   iteration=iteration, validation_split=validation_split,
-                  num_limit=num_limit)
+                  num_limit=num_limit, save_callback=save_model)
+
     per_label = ""
     for entity in score["ents_per_type"]:
         s = score["ents_per_type"][entity]["f"]
         per_label += f"{entity}={s} "
 
+    # Write Result
     if not local:
         print(f"Write Result to Spread Sheet.")
         o = s3.Object(bucket, auth_path)
