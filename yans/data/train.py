@@ -19,7 +19,12 @@ from yans.storage import Storage
 def make_data(path):
     jsons = []
     with open(path, encoding="utf-8") as f:
-        jsons = [json.loads(line) for line in f.readlines()]
+        for line in f:
+            try:
+                jsons.append(json.loads(line))
+            except Exception as ex:
+                print("Parse Error")
+                pass
 
     data = []
     for j in jsons:
