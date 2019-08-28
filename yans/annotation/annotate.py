@@ -21,7 +21,7 @@ def main(from_path, to_path):
 
     annotated = []
     with open(from_path, encoding="utf-8") as f:
-        lines = f.readlines()[:50]
+        lines = f.readlines()
         for d in tqdm(lines):
             instance = json.loads(d.strip())
             text = instance["text"]
