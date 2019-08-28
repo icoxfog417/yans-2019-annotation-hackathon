@@ -10,6 +10,10 @@
 
 ![annotator workflow](./images/annotation_workflow.png)
 
+* You can easily deploy doccano by Heroku Button.
+  * https://github.com/chakki-works/doccano
+  * Recommendation: Use above hobby (for Heroku)/ hobby-basic (PostgreSQL) plan.
+
 ### Evaluation Backend
 
 ![annotator workflow](./images/backend_workflow.png)
